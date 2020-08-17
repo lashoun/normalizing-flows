@@ -31,32 +31,6 @@ import matplotlib.pyplot as plt
 
 # %% [markdown]
 # # Introduction to Normalizing Flows
-#
-# $\newcommand{bb}[1]{\mathbb{#1}}
-# \newcommand{bs}[1]{\boldsymbol{#1}}
-# \newcommand{mbf}[1]{\boldsymbol{\mathbf{#1}}}
-# \newcommand{mrm}[1]{\mathrm{#1}}
-# \newcommand{mcal}[1]{\mathcal{#1}}
-# \newcommand{\eps}{\epsilon}
-# \newcommand{\veps}{\varepsilon}
-# \newcommand{\Var}{\mathrm{Var}}
-# \newcommand{\indep}{{\perp\!\!\!\!\perp}}
-# \newcommand{\bigo}{\mathcal{O}}
-# \newcommand{\del}[2]{\frac{\partial#1}{\partial#2}}
-# \newcommand{\ddel}[3]{\frac{\partial^{^{#3}}\! #1}{\partial#2^{^{#3}}}}
-# \newcommand{\diff}[2]{\frac{d #1}{d #2}}
-# \newcommand{\ddiff}[3]{\frac{d^{^{#3}}\! #1}{ d #2^{^{#3}}}}
-# \newcommand{\Diff}[2]{\frac{ \mathrm{d}#1}{\mathrm{d}#2}}
-# \newcommand{\DDiff}[3]{\frac{\mathrm{d}^{^{#3}}\! #1}{ \mathrm{d} #2^{^{#3}}}}
-# \newcommand{\dx}{\mathop{}\!d}
-# \newcommand{\ddx}[1]{\mathop{}\!d^#1}
-# \newcommand{\Dx}{\mathop{}\!\mathrm{d}}
-# \newcommand{\DDx}[1]{\mathop{}\!\mathrm{d^#1}}
-# \DeclareMathOperator*{\argmax}{arg\,max}
-# \DeclareMathOperator*{\argmin}{arg\,min}
-# \newcommand{\tr}{\mathrm{Tr}}
-# \newcommand{\cov}{\mathrm{Cov}}
-# $
 
 # %% [markdown]
 #
@@ -382,7 +356,7 @@ losses = train(model, 1000, n_samples, optim, scheduler)
 view(model, losses)
 
 # %% [markdown]
-# # Sources and related stuff
+# # Sources and related work
 #
 # ## Repositories
 #
@@ -401,3 +375,33 @@ view(model, losses)
 # ## Papers
 #
 # - [Normalizing Flows for Probabilistic Modeling and Inference](https://arxiv.org/abs/1912.02762), Papamakarios et al., 2019
+
+# %% [markdown]
+# ## Latex commands
+#
+# $$
+# \newcommand{bb}[1]{\mathbb{#1}}
+# \newcommand{bs}[1]{\boldsymbol{#1}}
+# \newcommand{mbf}[1]{\boldsymbol{\mathbf{#1}}}
+# \newcommand{mrm}[1]{\mathrm{#1}}
+# \newcommand{mcal}[1]{\mathcal{#1}}
+# \newcommand{\eps}{\epsilon}
+# \newcommand{\veps}{\varepsilon}
+# \newcommand{\Var}{\mathrm{Var}}
+# \newcommand{\indep}{{\perp\!\!\!\!\perp}}
+# \newcommand{\bigo}{\mathcal{O}}
+# \newcommand{\del}[2]{\frac{\partial#1}{\partial#2}}
+# \newcommand{\ddel}[3]{\frac{\partial^{^{#3}}\! #1}{\partial#2^{^{#3}}}}
+# \newcommand{\diff}[2]{\frac{d #1}{d #2}}
+# \newcommand{\ddiff}[3]{\frac{d^{^{#3}}\! #1}{ d #2^{^{#3}}}}
+# \newcommand{\Diff}[2]{\frac{ \mathrm{d}#1}{\mathrm{d}#2}}
+# \newcommand{\DDiff}[3]{\frac{\mathrm{d}^{^{#3}}\! #1}{ \mathrm{d} #2^{^{#3}}}}
+# \newcommand{\dx}{\mathop{}\!d}
+# \newcommand{\ddx}[1]{\mathop{}\!d^#1}
+# \newcommand{\Dx}{\mathop{}\!\mathrm{d}}
+# \newcommand{\DDx}[1]{\mathop{}\!\mathrm{d^#1}}
+# \DeclareMathOperator*{\argmax}{arg\,max}
+# \DeclareMathOperator*{\argmin}{arg\,min}
+# \newcommand{\tr}{\mathrm{Tr}}
+# \newcommand{\cov}{\mathrm{Cov}}
+# $$
