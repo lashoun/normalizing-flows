@@ -16,18 +16,42 @@
 # %% [markdown]
 # ## Imports
 
-# %%
+# %% tags=[]
 from __future__ import division
+
 from sklearn import cluster, datasets, mixture
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
+
 import torch
-import torch.nn as nn 
-from math import pi 
-from torch.distributions.multivariate_normal import MultivariateNormal
-from torch.distributions import LogisticNormal
+import torch.optim as optim
+import torch.nn.functional as F
+import torch.nn.init as init
+from torch import nn
+from torch import distributions
+from torch.distributions import MultivariateNormal, Uniform, TransformedDistribution, SigmoidTransform, LogisticNormal
+from torch.nn.parameter import Parameter
+
 import numpy as np
 import matplotlib.pyplot as plt
+# %matplotlib inline
+
+from nflib.flows import (
+    AffineConstantFlow, ActNorm, AffineHalfFlow, 
+    # SlowMAF, MAF, IAF, Invertible1x1Conv,
+    NormalizingFlow, NormalizingFlowModel,
+)
+
+# %load_ext autoreload
+# %autoreload 2
+
+# %%
+device = torch.device(
+        "cuda:" + str(args.gpu) if torch.cuda.is_available() else "cpu"
+    )
+
+# %%
+torch.cuda.is_available()
+
 
 # %% [markdown]
 # # Introduction to Normalizing Flows
@@ -121,12 +145,18 @@ import matplotlib.pyplot as plt
 # ## Target distribution $p_\mathrm{x}(\mathbf{x})$
 
 # %%
-n_samples = 2000
-noisy_moons = datasets.make_moons(n_samples=n_samples, noise=.05)
-X, y = noisy_moons
-# normalize
+class DatasetMoons:
+    """ two half-moons """
+    def sample(self, n):
+        moons = datasets.make_moons(n_samples=n, noise=0.05)[0].astype(np.float32)
+        return torch.from_numpy(moons)
+        
+px = DatasetMoons()
+
+X = px.sample(128)
 X = StandardScaler().fit_transform(X)
 plt.scatter(X[:, 0], X[:, 1])
+plt.show()
 
 # %% [markdown]
 # ## Base distribution $p_\mathrm{u}(\mathbf{u})$
@@ -134,10 +164,9 @@ plt.scatter(X[:, 0], X[:, 1])
 # %%
 base_mu, base_cov = torch.zeros(2), torch.eye(2)
 base_dist = MultivariateNormal(base_mu, base_cov)
-Z = base_dist.rsample(sample_shape=(3000,)) # careful, named Z, not U
-plt.scatter(Z[:, 0], Z[:, 1])
+U = base_dist.rsample(sample_shape=(512,))
+plt.scatter(U[:, 0], U[:, 1])
 plt.show()
-
 
 # %% [markdown]
 # # Constructing Flows Part I: Finite Compositions
@@ -181,11 +210,29 @@ plt.show()
 # - Unknown whether they are universal approximators even with multiple layers
 
 # %%
-# Note: in the Python functions, inputs will typically be noted x and outputs z like classic neural networks
-def affine_autoregressive_forward(x, h):
-    alpha, beta = h
-    z = alpha * x + beta
-    return z
+flows = [AffineHalfFlow(dim=2, parity=i%2) for i in range(9)]
+model = NormalizingFlowModel(base_dist, flows)
+
+# %% tags=[]
+# optimizer
+optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5) # TODO tune weight_decay
+print("Number of params: {}".format(sum(p.numel() for p in model.parameters())))
+
+# %% tags=[]
+model.train()
+for k in range(1000):
+    x = px.sample(128)
+
+    zs, prior_logprob, log_det = model(x)
+    logprob = prior_logprob + log_det
+    loss = -torch.sum(logprob) # NLL
+
+    model.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if k % 100 == 0:
+        print(loss.item())
 
 
 # %%
