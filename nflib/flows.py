@@ -53,7 +53,7 @@ class AffineConstantFlow(nn.Module):
             nn.Parameter(torch.randn(1, dim, requires_grad=True)) if scale else None
         )
         self.t = (
-            nn.Parameter(torch.randn(1, dim, requires_grad=Trues)) if shift else None
+            nn.Parameter(torch.randn(1, dim, requires_grad=True)) if shift else None
         )
 
     def forward(self, x):
@@ -73,7 +73,7 @@ class AffineConstantFlow(nn.Module):
 
 class ActNorm(AffineConstantFlow):
     """
-    Really an AffinceConstantFlow but with a data-dependent initialization, where on the very first batch we clever initialize (s, t) so that the output is unit gaussian. As described in Glow paper.
+    Really an AffineConstantFlow but with a data-dependent initialization, where on the very first batch we clever initialize (s, t) so that the output is unit gaussian. As described in Glow paper.
     """
 
     def __init__(self, *args, **kwargs):
@@ -119,7 +119,9 @@ class AffineHalfFlow(nn.Module):
         z1 = torch.exp(s) * x1 + t  # transform this half as a function of the other
         if self.parity:
             z0, z1 = z1, z0
-        z = torch.cat([z0, z1], dim=1)
+        z = torch.zeros((x.shape[0], self.dim))
+        z[:, ::2] = z0
+        z[:, 1::2] = z1
         log_det = torch.sum(s, dim=1)
         return z, log_det
 
@@ -133,7 +135,9 @@ class AffineHalfFlow(nn.Module):
         x1 = (z1 - t) * torch.exp(-s)  # reverse the transform on this half
         if self.parity:
             x0, x1 = x1, x0
-        x = torch.cat([x0, x1], dim=1)
+        x = torch.zeros((z.shape[0], self.dim))
+        x[:, ::2] = x0
+        x[:, 1::2] = x1
         log_det = torch.sum(-s, dim=1)
         return x, log_det
 
@@ -160,7 +164,7 @@ class NormalizingFlow(nn.Module):
         log_det = torch.zeros(m)
         xs = [z]
         for flow in self.flows:
-            z, ld = flow.forward(z)
+            z, ld = flow.backward(z)
             log_det += ld
             xs.append(z)
         return xs, log_det
