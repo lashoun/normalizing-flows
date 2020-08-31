@@ -38,7 +38,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from nflib.nets import LeafParam, MLP, ARMLP
+from nflib.nets import LeafParam, MLP, ARMLP, SpectralNormMLP
+from nflib.utils import power_series_matrix_logarithm_trace
 
 
 class AffineConstantFlow(nn.Module):
@@ -173,21 +174,75 @@ class NormalizingFlow(nn.Module):
 class NormalizingFlowModel(nn.Module):
     """ A Normalizing Flow Model is a (prior, flow) pair """
 
-    def __init__(self, prior, flows):
+    def __init__(self, prior, flows, compute_grad=False):
         super().__init__()
         self.prior = prior
         self.flow = NormalizingFlow(flows)
+        self.compute_grad = compute_grad
 
     def forward(self, x):
+        if self.compute_grad:
+            x = torch.tensor(x, requires_grad=True)
         zs, log_det = self.flow.forward(x)
         prior_logprob = self.prior.log_prob(zs[-1]).view(x.size(0), -1).sum(1)
         return zs, prior_logprob, log_det
 
     def backward(self, z):
+        if self.compute_grad:
+            z = torch.tensor(z, requires_grad=True)
         xs, log_det = self.flow.backward(z)
         return xs, log_det
 
     def sample(self, num_samples):
         z = self.prior.sample((num_samples,))
+        if self.compute_grad:
+            z = torch.tensor(z, requires_grad=True)
         xs, _ = self.flow.backward(z)
         return xs
+
+
+class ContractiveResidualFlow(nn.Module):
+    """ 
+    If a neural network g_res is contractive, the residual transformation is guaranteed to be invertible;
+    Spectral Normalization (https://arxiv.org/abs/1802.05957) is used to enforce contractiveness;
+    Hutchinson's trace estimator is used for fast computation of Jacobian determinant
+    """
+
+    def __init__(
+        self,
+        dim,
+        net_class=SpectralNormMLP,
+        nh=24,
+        inv_iters=100,
+        coeff=0.97,
+        n_power_iter=5,
+        num_trace_samples=1,
+        num_series_terms=1,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.g_res = net_class(
+            self.dim, self.dim, nh, coeff=coeff, n_power_iter=n_power_iter
+        )
+        self.inv_iters = inv_iters
+        self.num_trace_samples = num_trace_samples
+        self.num_series_terms = num_series_terms
+
+    def forward(self, x):
+        gx = self.g_res(x)
+        z = x + gx
+        log_det = power_series_matrix_logarithm_trace(
+            gx, x, self.num_series_terms, self.num_trace_samples
+        )
+        return z, log_det
+
+    def backward(self, z):
+        zk = z
+        for i in range(self.inv_iters):
+            gz = self.g_res(zk)
+            x = zk - gz
+            zk = x
+        log_det = power_series_matrix_logarithm_trace(
+            gz, z, self.num_series_terms, self.num_trace_samples
+        )
+        return x, log_det

@@ -8,9 +8,9 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.5.2
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: 'Python 3.8.3 64-bit (''deeplife-tnet'': conda)'
 #     language: python
-#     name: python3
+#     name: python_defaultSpec_1598255725508
 # ---
 
 # %% [markdown]
@@ -18,6 +18,8 @@
 
 # %% tags=[]
 from __future__ import division
+
+import itertools
 
 from sklearn import cluster, datasets, mixture
 from sklearn.preprocessing import StandardScaler
@@ -32,26 +34,37 @@ from torch.distributions import MultivariateNormal, Uniform, TransformedDistribu
 from torch.nn.parameter import Parameter
 
 import numpy as np
+from numpy.random import default_rng
 import matplotlib.pyplot as plt
+from matplotlib import collections as mc
 # %matplotlib inline
 
 from nflib.flows import (
     AffineConstantFlow, ActNorm, AffineHalfFlow, 
+    ContractiveResidualFlow,
     # SlowMAF, MAF, IAF, Invertible1x1Conv,
     NormalizingFlow, NormalizingFlowModel,
 )
+from nflib.nets import MLP, SpectralNormMLP
 
 # %load_ext autoreload
 # %autoreload 2
 
-# %%
+# %% tags=[]
+use_gpu = False
+# when set to True, it raises the following error in the model.train() cell...
+# 
+#     156         for flow in self.flows:
+#     157             x, ld = flow.forward(x)
+# --> 158             log_det += ld
+#     159             zs.append(x)
+#     160         return zs, log_det
+
+# RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!
+
 device = torch.device(
-        "cuda:" + str(args.gpu) if torch.cuda.is_available() else "cpu"
+        "cuda" if (torch.cuda.is_available() and use_gpu) else "cpu"
     )
-
-# %%
-torch.cuda.is_available()
-
 
 # %% [markdown]
 # # Introduction to Normalizing Flows
@@ -142,30 +155,68 @@ torch.cuda.is_available()
 # $$ D_\mathrm{KL} [ p_x(\mathbf{x} ; \boldsymbol{\theta}) \mathrel{\|} p_x^*(\mathbf{x}) ] = D_\mathrm{KL} [ p_u(\mathbf{u} ; \psi) \mathrel{\|} p_u^*(\mathbf{u} ; \phi) ] $$
 
 # %% [markdown]
-# ## Target distribution $p_\mathrm{x}(\mathbf{x})$
-
-# %%
-class DatasetMoons:
-    """ two half-moons """
-    def sample(self, n):
-        moons = datasets.make_moons(n_samples=n, noise=0.05)[0].astype(np.float32)
-        return torch.from_numpy(moons)
-        
-px = DatasetMoons()
-
-X = px.sample(128)
-X = StandardScaler().fit_transform(X)
-plt.scatter(X[:, 0], X[:, 1])
-plt.show()
-
-# %% [markdown]
 # ## Base distribution $p_\mathrm{u}(\mathbf{u})$
 
 # %%
 base_mu, base_cov = torch.zeros(2), torch.eye(2)
-base_dist = MultivariateNormal(base_mu, base_cov)
-U = base_dist.rsample(sample_shape=(512,))
+# base_dist = MultivariateNormal(base_mu, base_cov)
+prior = TransformedDistribution(Uniform(torch.zeros(2), torch.ones(2)), SigmoidTransform().inv) # Logistic distribution
+U = prior.rsample(sample_shape=(512,))
 plt.scatter(U[:, 0], U[:, 1])
+plt.show()
+
+# %% [markdown]
+# ## Target distribution $p_\mathrm{x}(\mathbf{x})$
+
+# %%
+rng = default_rng()
+random_state = 42
+
+class DatasetMoons:
+    """ two half-moons """
+    def __init__(self, noise=0.05, random_state=42):
+        self.random_state = random_state
+        self.noise = noise
+
+    def sample(self, n):
+        moons = datasets.make_moons(n_samples=n, noise=self.noise, random_state=random_state)[0].astype(np.float32)
+        return torch.from_numpy(moons)
+
+class DatasetBlobs:
+    """ 4 mixture of gaussians """
+    def __init__(self, random_state=42, centers=3, cluster_std=[1.0, 1.5, 0.5]):
+        self.random_state = random_state
+        self.centers = centers
+        self.cluster_std = cluster_std
+
+    def sample(self, n):
+        blobs = datasets.make_blobs(n_samples=n, centers=self.centers, cluster_std=self.cluster_std, random_state=self.random_state)[0].astype(np.float32)
+        return torch.from_numpy(blobs)
+
+class CustomTransform:
+    """ custom invertible function """
+    def __init__(self, prior, f):
+        self.f = f
+        self.prior = prior
+
+    def sample(self, n):
+        U = self.prior.rsample(sample_shape=(512,))
+        X = np.apply_along_axis(self.f, 1, U)
+        return torch.from_numpy(X)
+
+# px = DatasetMoons()
+# X = px.sample(256, random_state=42)
+
+# px = DatasetBlobs()
+# X = px.sample(256, random_state=42, centers=1, cluster_std=[1])
+
+def custom_f(x):
+    return 2*x[0] - x[1], np.arctan(x[0])
+px = CustomTransform(prior, custom_f)
+X = px.sample(256)
+
+X = StandardScaler().fit_transform(X)
+plt.scatter(X[:, 0], X[:, 1])
 plt.show()
 
 # %% [markdown]
@@ -209,198 +260,148 @@ plt.show()
 # - Simple and analytically tractable, but limited expressiveness
 # - Unknown whether they are universal approximators even with multiple layers
 
+# %% tags=[]
+n_flows = 10
+net_class = SpectralNormMLP
+compute_grad = True
+add_act_norm = False
+
+epochs = 1000
+
+train_sample_size=128
+x_sample_size=128
+z_sample_size=128
+
+ng = 20
+
 # %%
-flows = [AffineHalfFlow(dim=2, parity=i%2) for i in range(9)]
-model = NormalizingFlowModel(base_dist, flows)
+# flows = [AffineHalfFlow(dim=2, parity=i%2, net_class=net_class) for i in range(n_flows)]
+flows = [ContractiveResidualFlow(dim=2, net_class=net_class) for i in range(n_flows)]
+# flows = [AffineConstantFlow(dim=2) for i in range(n_flows)]
+
+if add_act_norm:
+    norms = [ActNorm(dim=2) for _ in flows]
+    flows = list(itertools.chain(*zip(norms, flows)))
+
+model = NormalizingFlowModel(prior, flows, compute_grad=compute_grad).to(device)
 
 # %% tags=[]
 # optimizer
 optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5) # TODO tune weight_decay
 print("Number of params: {}".format(sum(p.numel() for p in model.parameters())))
 
+
 # %% tags=[]
-model.train()
-for k in range(1000):
-    x = px.sample(128)
+def train_model(model, optimizer, px, train_sample_size, epochs):
+    model.train()
+    for k in range(epochs):
+        x = px.sample(train_sample_size).to(device)
+        zs, prior_logprob, log_det = model(x.float())
+        logprob = prior_logprob + log_det
+        loss = -torch.sum(logprob)  # negative log-likelihood
 
-    zs, prior_logprob, log_det = model(x)
-    logprob = prior_logprob + log_det
-    loss = -torch.sum(logprob) # NLL
-
-    model.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    if k % 100 == 0:
-        print(loss.item())
-
-
-# %%
-class R_NVP(nn.Module):
-    def __init__(self, d, k, hidden):
-        super().__init__()
-        self.d, self.k = d, k
-        self.sig_net = nn.Sequential(
-                    nn.Linear(k, hidden),
-                    nn.LeakyReLU(),
-                    nn.Linear(hidden, d - k))
-
-        self.mu_net = nn.Sequential(
-                    nn.Linear(k, hidden),
-                    nn.LeakyReLU(),
-                    nn.Linear(hidden, d - k))
-
-    def forward(self, x, flip=False):
-        x1, x2 = x[:, :self.k], x[:, self.k:] 
-
-        if flip:
-            x2, x1 = x1, x2
-        
-        # forward
-        sig = self.sig_net(x1)
-        z1, z2 = x1, x2 * torch.exp(sig) + self.mu_net(x1)
-        
-        if flip:
-            z2, z1 = z1, z2
-        
-        z_hat = torch.cat([z1, z2], dim=-1)
-
-        log_pz = base_dist.log_prob(z_hat)
-        log_jacob = sig.sum(-1)
-        
-        return z_hat, log_pz, log_jacob
-    
-    def inverse(self, Z, flip=False):
-        z1, z2 = Z[:, :self.k], Z[:, self.k:] 
-        
-        if flip:
-            z2, z1 = z1, z2
-        
-        x1 = z1
-        x2 = (z2 - self.mu_net(z1)) * torch.exp(-self.sig_net(z1))
-        
-        if flip:
-            x2, x1 = x1, x2
-        return torch.cat([x1, x2], -1)
-
-
-# %%
-class stacked_NVP(nn.Module):
-    def __init__(self, d, k, hidden, n):
-        super().__init__()
-        self.bijectors = nn.ModuleList([
-            R_NVP(d, k, hidden=hidden) for _ in range(n)
-        ])
-        self.flips = [True if i%2 else False for i in range(n)]
-        
-    def forward(self, x):
-        log_jacobs = []
-        
-        for bijector, f in zip(self.bijectors, self.flips):
-            x, log_pz, lj = bijector(x, flip=f)
-            log_jacobs.append(lj)
-        
-        return x, log_pz, sum(log_jacobs)
-    
-    def inverse(self, z):
-        for bijector, f in zip(reversed(self.bijectors), reversed(self.flips)):
-            z = bijector.inverse(z, flip=f)
-        return z
-
-
-# %% [markdown]
-# ## Training/Viewing BoilerPlate Code
-
-# %%
-def train(model, epochs, batch_size, optim, scheduler):
-    losses = []
-    for _ in range(epochs):
-
-        # get batch 
-        X, _ = datasets.make_moons(n_samples=batch_size, noise=.05)
-        X = torch.from_numpy(StandardScaler().fit_transform(X)).float()
-
-        optim.zero_grad()
-        z, log_pz, log_jacob = model(X)
-        loss = (-log_pz - log_jacob).mean()
-        losses.append(loss)
-
+        model.zero_grad()
         loss.backward()
-        optim.step()
-        scheduler.step()
-    return losses
+        optimizer.step()
+
+        if k % (epochs//10) == 0:
+            print(loss.item())
+
+train_model(model, optimizer, px, train_sample_size, epochs)
 
 
 # %%
-def view(model, losses):
-    plt.plot(losses)
-    plt.title("Model Loss vs Epoch")
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.show()
+def eval_model(model, px, x_sample_size, z_sample_size):
+    model.eval()
 
-    X_hat = model.inverse(Z).detach().numpy()
-    plt.scatter(X_hat[:, 0], X_hat[:, 1])
-    plt.title("Inverse of Normal Samples Z: X = F^-1(Z)")
-    plt.show()
+    x = px.sample(x_sample_size)
+    zs, prior_logprob, log_det = model(x.float())
+    z = zs[-1]
 
-    n_samples = 3000
-    X, _ = datasets.make_moons(n_samples=n_samples, noise=.05)
-    X = torch.from_numpy(StandardScaler().fit_transform(X)).float()
-    z, _, _ = model(X)
+    x = x.detach().numpy()
     z = z.detach().numpy()
-    plt.scatter(z[:, 0], z[:, 1])
-    plt.title("Transformation of Data Samples X: Z = F(X)")
+    p = model.prior.sample([x_sample_size, 2]).squeeze()
+    plt.figure(figsize=(15, 5))
+    plt.subplot(121)
+    plt.scatter(p[:,0], p[:,1], c='g', s=5)
+    plt.scatter(z[:,0], z[:,1], c='r', s=5)
+    plt.scatter(x[:,0], x[:,1], c='b', s=5)
+    plt.legend(['prior', 'x->z', 'data'])
+    plt.axis('scaled')
+    plt.title('x -> z')
+
+    zs = model.sample(z_sample_size)
+    z = zs[-1]
+    z = z.detach().numpy()
+    plt.subplot(122)
+    plt.scatter(x[:,0], x[:,1], c='b', s=5, alpha=0.5)
+    plt.scatter(z[:,0], z[:,1], c='r', s=5, alpha=0.5)
+    plt.legend(['data', 'z->x'])
+    plt.axis('scaled')
+    plt.title('z -> x')
+
     plt.show()
 
+eval_model(model, px, x_sample_size, z_sample_size)
 
-# %% [markdown]
-# ## Model Params
-
-# %%
-d = 2
-k = 1
-
-# %% [markdown]
-# # Single Layer R_NVP
 
 # %%
-model = R_NVP(d, k, hidden=512)
-optim = torch.optim.Adam(model.parameters(), lr=1e-3)
-scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.999)
-n_samples = 512
+def visualize_model(model, x_sample_size, ng):
+    """ Visualize the step-wise flow in the full net """
 
-# training loop
-losses = train(model, 1000, n_samples, optim, scheduler)
-view(model, losses)
+    x = px.sample(x_sample_size)
+    x_np = x.numpy()
+    
+    # plot the coordinate warp
+    xx, yy = np.linspace(np.min(x_np[:,0]), np.max(x_np[:,0]), ng), np.linspace(np.min(x_np[:,1]), np.max(x_np[:,1]), ng)
+    xv, yv = np.meshgrid(xx, yy)
+    xy = np.stack([xv, yv], axis=-1)
+    in_circle = np.sqrt((xy**2).sum(axis=2)) <= 3 # seems appropriate since we use radial distributions as priors
+    xy = xy.reshape((ng*ng, 2))
+    xy = torch.from_numpy(xy.astype(np.float32))
 
-# %% [markdown]
-# # 3 Layer R_NVP
+    zs, log_det = model.backward(xy)
 
-# %%
-model = stacked_NVP(d, k, hidden=512, n=3)
-optim = torch.optim.Adam(model.parameters(), lr=1e-3)
-scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.999)
+    backward_flow_names = [type(f).__name__ for f in model.flow.flows[::-1]]
+    nz = len(zs)
+    for i in range(nz - 1):
+        z0 = zs[i].detach().numpy()
+        z1 = zs[i+1].detach().numpy()
+        
+        # plot how the samples travel at this stage
+        figs, axs = plt.subplots(1, 2, figsize=(6, 3))
+        #plt.figure(figsize=(20,10))
+        axs[0].scatter(z0[:,0], z0[:, 1], c='r', s=3)
+        axs[0].scatter(z1[:,0], z1[:, 1], c='b', s=3)
+        axs[0].quiver(z0[:,0], z0[:,1], z1[:,0] - z0[:,0], z1[:,1] - z0[:,1], units='xy', scale=1, alpha=0.5)
+        axs[0].axis([np.min(x_np[:,0]), np.max(x_np[:,0]), np.min(x_np[:,1]), np.max(x_np[:,1])])
+        axs[0].set_title("layer %d -> %d (%s)" % (i, i+1, backward_flow_names[i]))
+        
+        q = z1.reshape((ng, ng, 2))
+        # y coords
+        p1 = np.reshape(q[1:,:,:], (ng**2-ng,2))
+        p2 = np.reshape(q[:-1,:,:], (ng**2-ng,2))
+        inc = np.reshape(in_circle[1:,:] | in_circle[:-1,:], (ng**2-ng,))
+        p1, p2 = p1[inc], p2[inc]
+        lcy = mc.LineCollection(zip(p1, p2), linewidths=1, alpha=0.5, color='k')
+        # x coords
+        p1 = np.reshape(q[:,1:,:], (ng**2-ng,2))
+        p2 = np.reshape(q[:,:-1,:], (ng**2-ng,2))
+        inc = np.reshape(in_circle[:,1:] | in_circle[:,:-1], (ng**2-ng,))
+        p1, p2 = p1[inc], p2[inc]
+        lcx = mc.LineCollection(zip(p1, p2), linewidths=1, alpha=0.5, color='k')
+        # draw the lines
+        axs[1].add_collection(lcy)
+        axs[1].add_collection(lcx)
+        axs[1].axis([np.min(x_np[:,0]), np.max(x_np[:,0]), np.min(x_np[:,1]), np.max(x_np[:,1])])
+        axs[1].set_title("grid warp at the end of %d" % (i+1,))
+        
+        # draw the data too
+        plt.scatter(x[:,0], x[:,1], c='r', s=5, alpha=0.5)
 
-n_samples = 512
+        plt.show()
 
-# training loop
-losses = train(model, 1000, n_samples, optim, scheduler)
-view(model, losses)
-
-# %% [markdown]
-# # 5 Layer R_NVP
-
-# %%
-model = stacked_NVP(d, k, hidden=512, n=5)
-optim = torch.optim.Adam(model.parameters(), lr=1e-3)
-scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.999)
-
-n_samples = 512
-
-# training loop
-losses = train(model, 1000, n_samples, optim, scheduler)
-view(model, losses)
+visualize_model(model, x_sample_size, ng)
 
 # %% [markdown]
 # # Sources and related work

@@ -5,11 +5,13 @@ Sources:
 - https://github.com/karpathy/pytorch-normalizing-flows/blob/master/nflib/made.py
 """
 
+import inspect
 from collections import OrderedDict
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from nflib.spectral_norm_fc import spectral_norm_fc
 
 
 class MaskedLinear(nn.Linear):
@@ -61,17 +63,17 @@ class PositionalEncoder(nn.Module):
 class MLP(nn.Module):
     """ a simple `nlayers`-layer MLP """
 
-    def __init__(self, nin, nout, nh, nlayers=4, neg_slope=0.2):
+    def __init__(self, nin, nout, nh, nlayers=4, neg_slope=0.2, **kwargs):
         super().__init__()
         assert nlayers > 1, "nlayers must be > 1"
         layers = [
             ("input", nn.Linear(nin, nh)),
-            ("leakyRelu0", nn.LeakyReLU(neg_slope)),
+            ("leakyrelu0", nn.LeakyReLU(neg_slope)),
         ]
         for i in range(nlayers - 2):
             layers += [
                 ("linear{}".format(i + 1), nn.Linear(nh, nh)),
-                ("leakyRelu{}".format(i + 1), nn.LeakyReLU(neg_slope)),
+                ("leakyrelu{}".format(i + 1), nn.LeakyReLU(neg_slope)),
             ]
         layers += [
             ("output", nn.Linear(nh, nout)),
@@ -191,3 +193,60 @@ class ARMLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class SpectralNormMLP(nn.Module):
+    """ An MLP with spectral normalization """
+
+    def __init__(
+        self,
+        nin,
+        nout,
+        nh,
+        nlayers=4,
+        non_linearity="leakyrelu",
+        neg_slope=0.2,
+        coeff=0.97,
+        n_power_iter=5,
+        **kwargs
+    ):
+        super().__init__()
+        assert nlayers > 1, "nlayers must be > 1"
+
+        self.coeff = coeff
+        self.n_power_iter = n_power_iter
+        nonlin = {
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softplus": nn.Softplus,
+            "sorting": lambda: MaxMinGroup(group_size=2, axis=1),
+            "leakyrelu": nn.LeakyReLU,
+        }[non_linearity]
+        nonlin_params = {"neg_slope": neg_slope}
+        filtered_nonlin_params = {
+            k: v
+            for k, v in nonlin_params.items()
+            if k in [p.name for p in inspect.signature(nonlin).parameters.values()]
+        }
+
+        layers = [
+            ("input", self._wrapper_spectral_norm(nn.Linear(nin, nh)),),
+            (non_linearity + "0", nonlin(**filtered_nonlin_params)),
+        ]
+        for i in range(nlayers - 2):
+            layers += [
+                (
+                    "linear{}".format(i + 1),
+                    self._wrapper_spectral_norm(nn.Linear(nh, nh)),
+                ),
+                (non_linearity + str(i + 1), nonlin(**filtered_nonlin_params)),
+            ]
+        layers += [("output", self._wrapper_spectral_norm(nn.Linear(nh, nout)),)]
+        self.net = nn.Sequential(OrderedDict(layers))
+
+    def forward(self, x):
+        return self.net(x)
+
+    def _wrapper_spectral_norm(self, layer):
+        return spectral_norm_fc(layer, self.coeff, n_power_iterations=self.n_power_iter)
+
